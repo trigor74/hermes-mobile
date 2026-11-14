@@ -333,6 +333,9 @@ object HermesWsClient {
     @VisibleForTesting
     internal fun clearSeqWatermarks() = replayTracker.clearSeqWatermarks()
 
+    /** Видалені сесії більше не відтворюються після перепідключення (див. [ReplayTracker.forget]). */
+    fun forgetDeletedSessions(sessionIds: Set<String>) = replayTracker.forget(sessionIds)
+
     @VisibleForTesting
     internal fun isReplayInFlight(): Boolean = replayTracker.isReplayInFlight()
 

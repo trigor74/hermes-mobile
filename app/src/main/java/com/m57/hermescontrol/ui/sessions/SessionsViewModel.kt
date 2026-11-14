@@ -26,6 +26,7 @@ import com.m57.hermescontrol.data.remote.NetworkError
 import com.m57.hermescontrol.data.remote.NetworkResult
 import com.m57.hermescontrol.data.remote.safeApiCall
 import com.m57.hermescontrol.data.remote.safeApiRead
+import com.m57.hermescontrol.data.session.DeletedSessionEvents
 import com.m57.hermescontrol.data.session.ProfileSwitchCoordinator
 import com.m57.hermescontrol.data.session.SessionAttentionStore
 import com.m57.hermescontrol.data.session.SessionMutationFence
@@ -1405,6 +1406,8 @@ class SessionsViewModel(
                         )
                     }
                     ShortcutRefreshEvents.refresh()
+                    // Чат міг мати цю сесію відкритою: хай перейде до нового чату.
+                    DeletedSessionEvents.emit(setOf(sessionId))
                 }
 
                 is NetworkResult.Failure -> {
@@ -1454,6 +1457,8 @@ class SessionsViewModel(
                     ShortcutRefreshEvents.refresh()
                     val skipped = result.data.skippedActive.toSet()
                     val removedIds = ids.filterNot { it in skipped }.toSet()
+                    // Чат міг мати одну з них відкритою: хай перейде до нового чату.
+                    DeletedSessionEvents.emit(removedIds)
                     draftScope?.let { owner ->
                         val draftStore = ComposerDraftStore.initialized()
                         removedIds.forEach { draftStore?.remove(ComposerDraftKey(owner, it)) }

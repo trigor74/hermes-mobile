@@ -12004,6 +12004,28 @@ class ChatViewModelTest {
         }
 
     @Test
+    fun `deleting the open session in history moves the chat to a fresh draft`() =
+        runTest {
+            val (vm, sessionId) = createViewModelWithSession()
+            val createsBefore = sentRequestMethods.count { it.first == WsMethods.SESSION_CREATE }
+
+            // Видалення іншої сесії чат не чіпає.
+            com.m57.hermescontrol.data.session.DeletedSessionEvents
+                .emit(setOf("other-session"))
+            advanceUntilIdle()
+            assertEquals(sessionId, vm.uiState.value.currentSessionId)
+
+            // Видалили саме відкриту: чат іде в нову чернетку, без session.create.
+            com.m57.hermescontrol.data.session.DeletedSessionEvents
+                .emit(setOf(sessionId))
+            advanceUntilIdle()
+            assertNull(vm.uiState.value.currentSessionId)
+            assertTrue(vm.uiState.value.isDraftSession)
+            assertTrue(vm.uiState.value.messages.isEmpty())
+            assertEquals(createsBefore, sentRequestMethods.count { it.first == WsMethods.SESSION_CREATE })
+        }
+
+    @Test
     fun `slash command from a draft runs after the session is created`() =
         runTest {
             val vm = createViewModel()

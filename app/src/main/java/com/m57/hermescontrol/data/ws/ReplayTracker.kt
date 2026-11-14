@@ -211,6 +211,17 @@ internal class ReplayTracker(
         replayInFlight = false
     }
 
+    /**
+     * Забути видалені сесії: інакше після перепідключення транспорт просить їхні пропущені
+     * події (`session.events.since`) і отримує 4001 not_found, що показується як помилка.
+     */
+    fun forget(sessionIds: Set<String>) {
+        sessionIds.forEach { sid ->
+            lastSeenSeq.remove(sid)
+            replayHold.remove(sid)
+        }
+    }
+
     @VisibleForTesting
     internal fun getSeqWatermarks(): Map<String, Int> = HashMap(lastSeenSeq)
 

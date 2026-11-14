@@ -35,6 +35,7 @@ import com.m57.hermescontrol.data.remote.safeApiCall
 import com.m57.hermescontrol.data.remote.safeApiRead
 import com.m57.hermescontrol.data.repository.VoiceNoteRepository
 import com.m57.hermescontrol.data.session.ActiveSessionHolder
+import com.m57.hermescontrol.data.session.DeletedSessionEvents
 import com.m57.hermescontrol.data.session.ProfileSwitchCoordinator
 import com.m57.hermescontrol.data.ws.ChangeEvents
 import com.m57.hermescontrol.data.ws.CommandBlocklist
@@ -1209,6 +1210,15 @@ class ChatViewModel(
                         if (!cacheLoaded) loadCachedMessages(sessionId, sessionGeneration)
                     }
                 }
+            }
+        }
+        // Відкриту сесію видалили в історії: показувати її далі не можна (кожне опитування —
+        // 4001 not_found / 404). Переходимо до нового чату-чернетки, сесію не створюємо.
+        viewModelScope.launch {
+            DeletedSessionEvents.events.collect { ids ->
+                // Транспорт не повинен просити пропущені події видалених сесій після перепідключення.
+                wsClient.forgetDeletedSessions(ids)
+                if (_uiState.value.currentSessionId in ids) createNewSession(setLoading = false)
             }
         }
         // Desktop parity (requestFreshSession): when the profile switch
