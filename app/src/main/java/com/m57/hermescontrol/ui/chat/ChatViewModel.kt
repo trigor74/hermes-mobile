@@ -724,6 +724,15 @@ class ChatViewModel(
      */
     private var sessionHasServerPresence = false
 
+    /**
+     * Сесію щойно створив канонічний `session.create` маршруту session-authority
+     * (відповідь містить `authority_epoch`): такий шлюз записує рядок у БД одразу,
+     * а не на першому промпті. Тоді перепідключення має відновити її (resume), а не
+     * створювати нову — інакше кожне згортання застосунку лишає в історії порожню
+     * сесію. Впливає лише на [handleGatewayReady]; [sessionHasServerPresence] не чіпає.
+     */
+    private var createdSessionPersisted = false
+
     /** Dedupe guard for [recoverGoneSession] (WS reject + REST 404 land together). */
     private var sessionGoneRecoveryInFlight = false
 
@@ -1194,6 +1203,7 @@ class ChatViewModel(
                     refreshProjectsJob = null
                     pendingGoneSessionNotice = false
                     sessionHasServerPresence = false
+                    createdSessionPersisted = false
                     resetSessionState(sessionId = null, title = "", isLoading = true)
                 }
         }
@@ -1212,6 +1222,7 @@ class ChatViewModel(
                     refreshProjectsJob = null
                     pendingGoneSessionNotice = false
                     sessionHasServerPresence = false
+                    createdSessionPersisted = false
                     resetSessionState(sessionId = null, title = "", isLoading = true)
                 }
         }
@@ -1303,7 +1314,8 @@ class ChatViewModel(
         modelSwitchDelegate.preloadModelOptions()
         val currentId = _uiState.value.currentSessionId
         if (currentId != null) {
-            if (sessionHasServerPresence) {
+            // Сесію, збережену шлюзом ще під час створення, відновлюємо, а не створюємо заново.
+            if (sessionHasServerPresence || createdSessionPersisted) {
                 resumeSession(currentId, sessionGeneration)
             } else {
                 // Issue #969: No server-side row yet — the gateway dropped the
@@ -2319,6 +2331,8 @@ class ChatViewModel(
                 // The gateway persists the row lazily on the first prompt —
                 // do not resume this key until presence is confirmed.
                 sessionHasServerPresence = false
+                // Виняток: канонічний session.create (є `authority_epoch`) уже записав рядок у БД.
+                createdSessionPersisted = resultMap.containsKey("authority_epoch")
                 sessionGoneRecoveryInFlight = false
                 _uiState.update {
                     it.copy(
@@ -2416,6 +2430,7 @@ class ChatViewModel(
                 resumedGeneration = generation
                 ActiveSessionHolder.set(runtimeId, storageId)
                 sessionHasServerPresence = false
+                createdSessionPersisted = false
                 sessionGoneRecoveryInFlight = false
                 addSystemMessage("Session branched", persist = true)
                 if (resultMap["branched_session_id"] is String) {
@@ -5771,6 +5786,8 @@ class ChatViewModel(
     ) {
         // A fresh create has no persisted row until the first prompt.
         sessionHasServerPresence = false
+        // Прапорець попередньої сесії не переносимо: його виставить відповідь на цей create.
+        createdSessionPersisted = false
         val generation = resetSessionState(sessionId = null, title = "", isLoading = setLoading)
         val cwd = project?.launchCwd
         _uiState.update { it.copy(stagedProject = project.takeIf { cwd != null }) }

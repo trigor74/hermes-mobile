@@ -11888,6 +11888,64 @@ class ChatViewModelTest {
             )
         }
 
+    /**
+     * Регресія: канонічний session.create (session-authority, є `authority_epoch`) одразу
+     * записує сесію в БД. Повернення застосунку з фону (новий сокет → gateway.ready) має
+     * відновити цю порожню сесію, а не створювати ще одну — інакше історія засмічується.
+     */
+    @Test
+    fun `reconnect resumes an authority-created session instead of creating another`() =
+        runTest {
+            val vm = createViewModel()
+            advanceUntilIdle()
+            mockConnectionStatus.value = ConnectionStatus.CONNECTED
+            mockEventsFlow.emit(WsEvent.GatewayReady(null))
+            advanceUntilIdle()
+
+            val createId = sentRequestMethods.last { it.first == WsMethods.SESSION_CREATE }.second
+            mockEventsFlow.emit(
+                WsEvent.RpcResult(
+                    createId,
+                    mapOf("session_id" to "rt-1", "stored_session_id" to "stored-1", "authority_epoch" to 1.0),
+                ),
+            )
+            advanceUntilIdle()
+            assertEquals("stored-1", vm.uiState.value.currentSessionId)
+            val createsBefore = sentRequestMethods.count { it.first == WsMethods.SESSION_CREATE }
+
+            // Згорнули й розгорнули застосунок: сокет перепідключився.
+            mockEventsFlow.emit(WsEvent.GatewayReady(null))
+            advanceUntilIdle()
+
+            assertEquals(createsBefore, sentRequestMethods.count { it.first == WsMethods.SESSION_CREATE })
+            assertTrue(sentRequestMethods.any { it.first == WsMethods.SESSION_RESUME })
+        }
+
+    @Test
+    fun `reconnect still re-creates a legacy unpersisted session`() =
+        runTest {
+            // Legacy-шлюз (без `authority_epoch`) пише рядок лише на першому промпті: поведінка #969 без змін.
+            val vm = createViewModel()
+            advanceUntilIdle()
+            mockConnectionStatus.value = ConnectionStatus.CONNECTED
+            mockEventsFlow.emit(WsEvent.GatewayReady(null))
+            advanceUntilIdle()
+
+            val createId = sentRequestMethods.last { it.first == WsMethods.SESSION_CREATE }.second
+            mockEventsFlow.emit(
+                WsEvent.RpcResult(createId, mapOf("session_id" to "rt-2", "stored_session_id" to "stored-2")),
+            )
+            advanceUntilIdle()
+            assertEquals("stored-2", vm.uiState.value.currentSessionId)
+            val createsBefore = sentRequestMethods.count { it.first == WsMethods.SESSION_CREATE }
+
+            mockEventsFlow.emit(WsEvent.GatewayReady(null))
+            advanceUntilIdle()
+
+            assertEquals(createsBefore + 1, sentRequestMethods.count { it.first == WsMethods.SESSION_CREATE })
+            assertTrue(sentRequestMethods.none { it.first == WsMethods.SESSION_RESUME })
+        }
+
     @Test
     fun `reconnect with unpersisted session re-creates session on new socket and dispatches queued prompt`() =
         runTest {
