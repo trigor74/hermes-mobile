@@ -283,5 +283,51 @@ object WsMethods {
             "pet.thumb", // line 1612
             "pet.disable", // line 1647
             "pet.scale", // line 1661
+            // Методи, прив'язані до конкретної сесії / процесу / запиту.
+            // Мультипрофільний шлюз (gateway/session_controls.py, hermes-agent 0.23.x)
+            // без `params.profile` резолвить сесію в профілі WS-квитка (зазвичай
+            // стартовому), тож у неосновному профілі ці виклики отримують
+            // 4001 not_found / permission_denied. З `profile` запит маршрутизується
+            // до профілю-власника. Для свого «дому» сервер сам вилучає ключ у методів
+            // із `_PROFILE_IMPLICIT` (prompt.*, session.interrupt/events.since/stats/
+            // mutate, approval.respond, clarify.respond); решта приймає `profile`
+            // за контрактом (перевірено на openrpc v0.23.1 і знімку контракту).
+            // Логічні назви: session.usage → session.stats, редагування →
+            // session.mutate переписуються в RpcChannel уже після decorate.
+            SESSION_INTERRUPT,
+            SESSION_REDIRECT,
+            SESSION_STEER,
+            SESSION_TITLE,
+            SESSION_BRANCH,
+            SESSION_BRANCH_WHOLE,
+            SESSION_COMPRESS,
+            SESSION_EVENTS_SINCE,
+            SESSION_CONTEXT_BREAKDOWN,
+            SESSION_USAGE,
+            SESSION_STATS,
+            SESSION_MUTATE,
+            SESSION_ACTIVE_LIST,
+            PROMPT_SUBMIT,
+            PROMPT_CANCEL,
+            PROMPT_RECEIPT,
+            PROMPT_BTW,
+            CLARIFY_RESPOND,
+            CLARIFY_LOCK,
+            APPROVAL_RESPOND,
+            APPROVAL_RECEIVED,
+            APPROVAL_PENDING,
+            COMMAND_DISPATCH,
+            SLASH_EXEC,
+            IMAGE_ATTACH_BYTES,
+            FILE_ATTACH,
+            PROCESS_LIST,
+            PROCESS_KILL,
+            PROCESS_STOP,
+            SUBAGENT_LIST,
+            SUBAGENT_TAIL,
+            SUBAGENT_INTERRUPT,
+            SUBAGENT_STEER,
+            CONNECTORS_LIST,
+            CONNECTORS_CONNECT,
         )
 }
