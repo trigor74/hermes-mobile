@@ -338,7 +338,9 @@ class ChatModelSwitchDelegate(
         }
         onModelSwitchInitiated()
         syncCurrentModelCapabilities()
-        handleSlashCommand("/model $model --provider $provider --session")
+        // Вибір у пікері — не набрана команда: перемикаємо напряму, без бульбашки
+        // "/model …" у чаті й без запису в локальну історію (як у десктопі).
+        handleModelSwitch("/model $model --provider $provider --session")
     }
 
     /**

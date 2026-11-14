@@ -12,6 +12,9 @@ data class SessionCreateParams(
     @SerialName("hidden") val hidden: Boolean? = null,
     @SerialName("cwd") val cwd: String? = null,
     @SerialName("cwd_explicit") val cwdExplicit: Boolean? = null,
+    // Модель, обрана в чернетці нового чату, задається при створенні сесії (як у десктопі).
+    @SerialName("model") val model: String? = null,
+    @SerialName("provider") val provider: String? = null,
 )
 
 /**

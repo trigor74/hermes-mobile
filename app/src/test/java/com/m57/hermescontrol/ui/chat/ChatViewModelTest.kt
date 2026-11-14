@@ -11968,6 +11968,42 @@ class ChatViewModelTest {
         }
 
     @Test
+    fun `model pick in a draft is staged and sent with session create`() =
+        runTest {
+            val vm = createViewModel()
+            advanceUntilIdle()
+            mockConnectionStatus.value = ConnectionStatus.CONNECTED
+            mockEventsFlow.emit(WsEvent.GatewayReady(null))
+            advanceUntilIdle()
+
+            val createParams = mutableListOf<Map<String, Any>>()
+            every { HermesWsClient.send(WsMethods.SESSION_CREATE, any(), any()) } answers {
+                reqCount++
+                val id = "req-id-$reqCount"
+                sentRequestMethods += WsMethods.SESSION_CREATE to id
+                createParams += arg<Map<String, Any>>(1)
+                arg<((String) -> Unit)?>(2)?.invoke(id)
+                id
+            }
+
+            // Вибір моделі в чернетці: сесію не створюємо, лише запам'ятовуємо й показуємо.
+            vm.openModelPicker()
+            vm.sendSlashModel("deepseek", "deepseek-flash")
+            advanceUntilIdle()
+            assertTrue(createParams.isEmpty())
+            assertTrue(vm.uiState.value.isDraftSession)
+            assertEquals("deepseek/deepseek-flash", vm.uiState.value.currentSessionModel)
+            assertTrue(sentRequestMethods.none { it.first == WsMethods.CONFIG_SET })
+
+            // Перше повідомлення створює сесію вже з обраною моделлю.
+            vm.sendMessage("hi")
+            advanceUntilIdle()
+            val params = createParams.single()
+            assertEquals(JsonPrimitive("deepseek-flash"), params["model"])
+            assertEquals(JsonPrimitive("deepseek"), params["provider"])
+        }
+
+    @Test
     fun `slash command from a draft runs after the session is created`() =
         runTest {
             val vm = createViewModel()

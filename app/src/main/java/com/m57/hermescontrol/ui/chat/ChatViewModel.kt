@@ -724,6 +724,14 @@ class ChatViewModel(
     /** Дії, відкладені до появи сесії з чернетки; виконуються після відповіді `session.create`. */
     private val afterDraftMintActions = mutableListOf<() -> Unit>()
 
+    /** Модель, обрана в чернетці: іде в `session.create` (model/provider), як у десктопі. */
+    private data class DraftModelPick(
+        val provider: String,
+        val model: String,
+    )
+
+    private var draftModelPick: DraftModelPick? = null
+
     /** Shared content waiting for the new session it was routed to (#1601); survives session resets. */
     private var stagedShare: IncomingShare? = null
 
@@ -5864,8 +5872,15 @@ class ChatViewModel(
     internal fun mintDraftSession() {
         if (!draftSession) return
         draftSession = false
+        val modelPick = draftModelPick
+        draftModelPick = null
         _uiState.update { it.copy(isDraftSession = false) }
-        sendSessionCreate(sessionGeneration, _uiState.value.stagedProject?.launchCwd, setLoading = false)
+        sendSessionCreate(
+            sessionGeneration,
+            _uiState.value.stagedProject?.launchCwd,
+            setLoading = false,
+            modelPick = modelPick,
+        )
     }
 
     /**
@@ -5902,6 +5917,7 @@ class ChatViewModel(
         generation: Long,
         cwd: String?,
         setLoading: Boolean,
+        modelPick: DraftModelPick? = null,
     ) {
         viewModelScope.launch(ioDispatcher) {
             wsClient.send(
@@ -5910,6 +5926,8 @@ class ChatViewModel(
                     source = DESKTOP_SESSION_SOURCE,
                     cwd = cwd,
                     cwdExplicit = if (cwd != null) true else null,
+                    model = modelPick?.model,
+                    provider = modelPick?.provider,
                 ),
                 onSent = { id -> trackSessionRequest(id, WsMethods.SESSION_CREATE, generation) },
             )
@@ -6043,11 +6061,8 @@ class ChatViewModel(
 
     // ── In-session model picker (issue #589) ─────────────────────────────
 
-    fun openModelPicker() {
-        // Модель перемикається для сесії: у чернетці створюємо її, поки користувач обирає.
-        mintDraftSession()
-        modelSwitchDelegate.openModelPicker()
-    }
+    // У чернетці пікер не створює сесію: вибір лише запам'ятовується (див. sendSlashModel).
+    fun openModelPicker() = modelSwitchDelegate.openModelPicker()
 
     fun refreshModelOptions() = modelSwitchDelegate.refreshModelOptions()
 
@@ -6061,7 +6076,22 @@ class ChatViewModel(
     fun sendSlashModel(
         provider: String,
         model: String,
-    ) = runWithSession { modelSwitchDelegate.sendSlashModel(provider, model) }
+    ) {
+        if (!draftSession) {
+            modelSwitchDelegate.sendSlashModel(provider, model)
+            return
+        }
+        // Чернетка: сесії ще немає, тож модель задасть сам session.create (model/provider),
+        // а не окреме перемикання — і порожня сесія не з'являється від одного лише вибору.
+        draftModelPick = DraftModelPick(provider = provider, model = model)
+        _uiState.update {
+            it.copy(
+                showModelPicker = false,
+                modelPickerLoading = false,
+                currentSessionModel = "$provider/$model",
+            )
+        }
+    }
 
     fun resetSessionModel() = runWithSession { modelSwitchDelegate.resetSessionModel() }
 
@@ -6886,6 +6916,7 @@ class ChatViewModel(
         // Будь-яке скидання виходить із чернетки; createNewSession за потреби вмикає її знову.
         draftSession = false
         afterDraftMintActions.clear()
+        draftModelPick = null
         ActiveSessionHolder.clear()
         cacheJob?.cancel()
         hydrationJob?.cancel()

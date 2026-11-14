@@ -277,13 +277,18 @@ class ChatModelSwitchDelegateTest {
         }
 
     @Test
-    fun sendSlashModel_optimisticallyUpdatesModelAndDispatchesSlash() {
-        delegate.sendSlashModel("openai", "gpt-4o")
-        assertEquals("openai/gpt-4o", uiState.value.currentSessionModel)
-        assertFalse(uiState.value.showModelPicker)
-        assertEquals(listOf("/model gpt-4o --provider openai --session"), slashCommands)
-        assertEquals(1, modelSwitchInitiated)
-    }
+    fun sendSlashModel_optimisticallyUpdatesModelAndSwitchesWithoutTranscriptCommand() =
+        testScope.runTest {
+            delegate.sendSlashModel("openai", "gpt-4o")
+            advanceUntilIdle()
+            assertEquals("openai/gpt-4o", uiState.value.currentSessionModel)
+            assertFalse(uiState.value.showModelPicker)
+            // Вибір у пікері не проходить через slash-обробник (без бульбашки "/model …" у чаті).
+            assertEquals(emptyList<String>(), slashCommands)
+            assertEquals("gpt-4o --provider openai --session", sentParams.single().value)
+            assertEquals("model", sentParams.single().key)
+            assertEquals(1, modelSwitchInitiated)
+        }
 
     @Test
     fun sendSlashModel_withSameModel_doesNotInitiateSwitchOrBlankTokens() {
@@ -332,10 +337,8 @@ class ChatModelSwitchDelegateTest {
     @Test
     fun dismissModelSwitchConfirm_revertsToPreviousModel() =
         testScope.runTest {
+            // sendSlashModel сам викликає handleModelSwitch (req-1).
             delegate.sendSlashModel("opencode-free", "muse-spark-1.3-contributor-free")
-            advanceUntilIdle()
-            // In real ChatViewModel, handleSlashCommand routes to handleModelSwitch:
-            delegate.handleModelSwitch("/model muse-spark-1.3-contributor-free --provider opencode-free --session")
             advanceUntilIdle()
             delegate.handleConfigSetResult(
                 id = "req-1",
@@ -350,9 +353,8 @@ class ChatModelSwitchDelegateTest {
     @Test
     fun handleConfigSetError_rollsBackToPreviousModel_onlyWhenMatchingCurrentSequence() =
         testScope.runTest {
+            // sendSlashModel сам викликає handleModelSwitch (req-1).
             delegate.sendSlashModel("openai", "gpt-4o")
-            advanceUntilIdle()
-            delegate.handleModelSwitch("/model gpt-4o --provider openai --session")
             advanceUntilIdle()
             assertEquals("openai/gpt-4o", uiState.value.currentSessionModel)
 
@@ -371,6 +373,8 @@ class ChatModelSwitchDelegateTest {
             // Switch to model with fast capability
             delegate.sendSlashModel("openai", "gpt-4o")
             advanceUntilIdle()
+            // Вибір моделі сам надсилає config.set (req-1): підтверджуємо його, щоб id не збігся з fast.
+            delegate.handleConfigSetResult("req-1", mapOf("key" to "model", "value" to "gpt-4o"))
             sentParams.clear()
 
             assertTrue(uiState.value.currentModelCapabilities?.fast == true)
@@ -409,6 +413,8 @@ class ChatModelSwitchDelegateTest {
             advanceUntilIdle()
             delegate.sendSlashModel("openai", "gpt-4o")
             advanceUntilIdle()
+            // Вибір моделі сам надсилає config.set (req-1): підтверджуємо його, щоб id не збігся з fast.
+            delegate.handleConfigSetResult("req-1", mapOf("key" to "model", "value" to "gpt-4o"))
             sentParams.clear()
             assertTrue(uiState.value.currentModelCapabilities?.fast == true)
 
@@ -634,16 +640,12 @@ class ChatModelSwitchDelegateTest {
     @Test
     fun rapidPicks_preservesOriginalConfirmedModelForRollback() =
         testScope.runTest {
-            // Pick model A
+            // Pick model A (sendSlashModel сам викликає handleModelSwitch: req-1)
             delegate.sendSlashModel("openai", "gpt-4o")
             advanceUntilIdle()
-            delegate.handleModelSwitch("/model gpt-4o --provider openai --session")
-            advanceUntilIdle()
 
-            // Pick model B before A confirms
+            // Pick model B before A confirms (req-2)
             delegate.sendSlashModel("anthropic", "claude-3-5-sonnet")
-            advanceUntilIdle()
-            delegate.handleModelSwitch("/model claude-3-5-sonnet --provider anthropic --session")
             advanceUntilIdle()
 
             // Dismiss confirmation on B — should revert to original model before both switches
