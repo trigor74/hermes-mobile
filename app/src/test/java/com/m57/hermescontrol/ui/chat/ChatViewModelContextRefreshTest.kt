@@ -211,6 +211,9 @@ class ChatViewModelContextRefreshTest {
         mockConnectionStatus.value = ConnectionStatus.CONNECTED
         mockEventsFlow.emit(WsEvent.GatewayReady(null))
         advanceUntilIdle()
+        // GatewayReady відкриває чернетку; імітуємо першу дію, що створює сесію.
+        vm.mintDraftSession()
+        advanceUntilIdle()
 
         val createId = requireNotNull(sessionCreateRequestId) { "session.create not sent" }
         mockEventsFlow.emit(

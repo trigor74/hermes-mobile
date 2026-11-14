@@ -337,6 +337,11 @@ data class ChatUiState(
     val killingProcessId: String? = null,
     // Session resume recovery (desktop parity: bounded auto-retry + error UI)
     val isSessionReady: Boolean = false,
+    /**
+     * Новий чат ще без серверної сесії (чернетка, як у десктопі): поле вводу активне,
+     * а `session.create` піде лише з першою дією, якій потрібна сесія.
+     */
+    val isDraftSession: Boolean = false,
     /** Project the not-yet-prompted chat will run in (#1527); null = default workspace. */
     val stagedProject: ProjectInfo? = null,
     /** Projects a new chat can start in, from `projects.list`; empty hides the picker. */
@@ -707,6 +712,17 @@ class ChatViewModel(
 
     private var pendingInitialPrompt: PendingPrompt? = null
     private var pendingNewConversationSend: PendingSend? = null
+
+    /**
+     * Чернетка нового чату: сесію ще не створено. Шлюз session-authority записує рядок у БД
+     * уже на `session.create`, тож створювати сесію наперед (на підключенні, перемиканні
+     * профілю, «+») означає засмічувати історію порожніми сесіями. Як у десктопі
+     * (`createBackendSessionForSend`), сесія створюється з першою дією, якій вона потрібна.
+     */
+    private var draftSession = false
+
+    /** Дії, відкладені до появи сесії з чернетки; виконуються після відповіді `session.create`. */
+    private val afterDraftMintActions = mutableListOf<() -> Unit>()
 
     /** Shared content waiting for the new session it was routed to (#1601); survives session resets. */
     private var stagedShare: IncomingShare? = null
@@ -1329,6 +1345,9 @@ class ChatViewModel(
             if (!initial.isNullOrBlank()) {
                 initialSessionId = null
                 switchSession(initial)
+            } else if (draftSession) {
+                // Чернетка вже відкрита (перепідключення): сесії ще немає, нічого не створюємо
+                // й не скидаємо — набраний текст і вкладення лишаються.
             } else if (AuthManager.isRestoreLastSession()) {
                 val restoredId = AuthManager.getLastOpenedSessionId()
                 if (!restoredId.isNullOrBlank()) {
@@ -2405,6 +2424,11 @@ class ChatViewModel(
                         ),
                     )
                 }
+
+                // Дії з чернетки (slash-команда, reasoning тощо), що чекали на появу сесії.
+                val deferred = afterDraftMintActions.toList()
+                afterDraftMintActions.clear()
+                deferred.forEach { it() }
             }
 
             WsMethods.SESSION_BRANCH,
@@ -3584,7 +3608,8 @@ class ChatViewModel(
             }
             return
         }
-        createNewSession(project = _uiState.value.stagedProject)
+        // Перенесене повідомлення відправляється з результату session.create — створюємо одразу.
+        createNewSession(project = _uiState.value.stagedProject, mintNow = true)
         pendingNewConversationSend = row
     }
 
@@ -3780,7 +3805,12 @@ class ChatViewModel(
                 openModelPicker()
                 return true
             }
-            handleSlashCommand(trimmed)
+            // Команди, що працюють із сесією, у чернетці спершу створюють її; локальні — ні.
+            if (slashNeedsSession(trimmed)) {
+                runWithSession { handleSlashCommand(trimmed) }
+            } else {
+                handleSlashCommand(trimmed)
+            }
             return true
         }
 
@@ -3923,6 +3953,8 @@ class ChatViewModel(
             pendingInitialPrompt =
                 PendingPrompt(text, attachments, wasStreaming, userMessage, createdAt, clickedMainTurnEpoch)
             publishPendingSends()
+            // Перше повідомлення з чернетки: саме зараз створюємо сесію.
+            mintDraftSession()
             return true
         }
 
@@ -4105,6 +4137,8 @@ class ChatViewModel(
             wsClient.connectionStatus.value == ConnectionStatus.CONNECTED &&
             (
                 (_uiState.value.isSessionReady && runtimeSessionId != null) ||
+                    // Чернетка: перше повідомлення саме створить сесію (див. sendMessage).
+                    (draftSession && pendingInitialPrompt == null) ||
                     (
                         _uiState.value.currentSessionId == null &&
                             pendingInitialPrompt == null &&
@@ -4563,10 +4597,12 @@ class ChatViewModel(
     /** Clipboard reads are asynchronous: bind them to this exact session generation and server. */
     internal fun captureAttachmentTarget(): ChatAttachmentTarget? {
         val state = _uiState.value
-        val sessionId = state.currentSessionId ?: return null
+        // У чернетці sessionId ще null; від «чужого» чату захищає generation (чернетка має свою).
+        val sessionId = state.currentSessionId
+        if (sessionId == null && !draftSession) return null
         // Connection status is combined into public uiState, not written to _uiState.
         if (wsClient.connectionStatus.value != ConnectionStatus.CONNECTED ||
-            !state.isSessionReady || _timelineState.value.isHistorical
+            !(state.isSessionReady || draftSession) || _timelineState.value.isHistorical
         ) {
             return null
         }
@@ -5496,13 +5532,23 @@ class ChatViewModel(
      */
     internal fun stageSharedContent(share: IncomingShare) {
         val state = _uiState.value
-        if (!state.hasConversation && state.isSessionReady && !_timelineState.value.isHistorical) {
+        if (!state.hasConversation &&
+            (state.isSessionReady || draftSession) &&
+            !_timelineState.value.isHistorical
+        ) {
             applySharedContent(share)
             return
         }
         val carried = share.copy(attachments = state.pendingAttachments + share.attachments)
         stagedShare = stagedShare?.plus(carried) ?: carried
         createNewSession(setLoading = false)
+        // Новий чат відкрився чернеткою (без session.create): вміст застосовуємо одразу.
+        if (draftSession) {
+            stagedShare?.let { staged ->
+                stagedShare = null
+                applySharedContent(staged)
+            }
+        }
     }
 
     private fun applySharedContent(share: IncomingShare) {
@@ -5777,20 +5823,86 @@ class ChatViewModel(
         val state = _uiState.value
         if (state.hasConversation || sessionHasServerPresence) return
         if (state.stagedProject?.id == project?.id) return
+        if (draftSession) {
+            // У чернетці сесії ще немає: проєкт лише запам'ятовуємо, cwd піде в session.create.
+            _uiState.update { it.copy(stagedProject = project?.takeIf { p -> p.launchCwd != null }) }
+            return
+        }
         createNewSession(setLoading = false, project = project)
     }
 
+    /**
+     * Відкриває новий чат. За замовчуванням — чернеткою без `session.create`
+     * ([mintDraftSession] створить сесію з першою дією, якій вона потрібна).
+     * [mintNow] = true — створити одразу (шляхи, що чекають на результат create).
+     */
     fun createNewSession(
         setLoading: Boolean = true,
         project: ProjectInfo? = null,
+        mintNow: Boolean = false,
     ) {
         // A fresh create has no persisted row until the first prompt.
         sessionHasServerPresence = false
         // Прапорець попередньої сесії не переносимо: його виставить відповідь на цей create.
         createdSessionPersisted = false
-        val generation = resetSessionState(sessionId = null, title = "", isLoading = setLoading)
+        val generation = resetSessionState(sessionId = null, title = "", isLoading = setLoading && mintNow)
         val cwd = project?.launchCwd
         _uiState.update { it.copy(stagedProject = project.takeIf { cwd != null }) }
+        if (!mintNow) {
+            draftSession = true
+            _uiState.update { it.copy(isDraftSession = true) }
+            return
+        }
+        sendSessionCreate(generation, cwd, setLoading)
+    }
+
+    /**
+     * Створює серверну сесію для чернетки (один раз); no-op поза чернеткою.
+     * `internal` лише для тестів: так тести імітують «першу дію» користувача.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun mintDraftSession() {
+        if (!draftSession) return
+        draftSession = false
+        _uiState.update { it.copy(isDraftSession = false) }
+        sendSessionCreate(sessionGeneration, _uiState.value.stagedProject?.launchCwd, setLoading = false)
+    }
+
+    /**
+     * Чи потрібна команді серверна сесія. Локальні (новий чат, /update, історія, керування
+     * чергою, переривання без ходу) та відхилені на місці (блок-лист, блокування профілю)
+     * не створюють сесію з чернетки.
+     */
+    private fun slashNeedsSession(command: String): Boolean {
+        if (!ProfileLock.allowsSlashCommand(command) || CommandBlocklist.contains(command)) return false
+        return when (slashDispatcher.dispatch(command)) {
+            SlashResult.NewSession,
+            SlashResult.Update,
+            SlashResult.OpenHistory,
+            SlashResult.Interrupt,
+            SlashResult.Stop,
+            is SlashResult.QueueManage,
+            -> false
+
+            else -> true
+        }
+    }
+
+    /** Виконує [action] одразу або — у чернетці — після створення сесії. */
+    private fun runWithSession(action: () -> Unit) {
+        if (!draftSession) {
+            action()
+            return
+        }
+        afterDraftMintActions += action
+        mintDraftSession()
+    }
+
+    private fun sendSessionCreate(
+        generation: Long,
+        cwd: String?,
+        setLoading: Boolean,
+    ) {
         viewModelScope.launch(ioDispatcher) {
             wsClient.send(
                 RpcMethods.SESSION_CREATE,
@@ -5931,7 +6043,11 @@ class ChatViewModel(
 
     // ── In-session model picker (issue #589) ─────────────────────────────
 
-    fun openModelPicker() = modelSwitchDelegate.openModelPicker()
+    fun openModelPicker() {
+        // Модель перемикається для сесії: у чернетці створюємо її, поки користувач обирає.
+        mintDraftSession()
+        modelSwitchDelegate.openModelPicker()
+    }
 
     fun refreshModelOptions() = modelSwitchDelegate.refreshModelOptions()
 
@@ -5945,17 +6061,18 @@ class ChatViewModel(
     fun sendSlashModel(
         provider: String,
         model: String,
-    ) = modelSwitchDelegate.sendSlashModel(provider, model)
+    ) = runWithSession { modelSwitchDelegate.sendSlashModel(provider, model) }
 
-    fun resetSessionModel() = modelSwitchDelegate.resetSessionModel()
+    fun resetSessionModel() = runWithSession { modelSwitchDelegate.resetSessionModel() }
 
     fun dismissModelSwitchConfirm() = modelSwitchDelegate.dismissModelSwitchConfirm()
 
     fun confirmModelSwitchExpensive() = modelSwitchDelegate.confirmModelSwitchExpensive()
 
-    fun setReasoningLevel(level: String?) = modelSwitchDelegate.setReasoningLevel(level)
+    // Обидва налаштування діють на сесію: з чернетки застосовуються після її створення.
+    fun setReasoningLevel(level: String?) = runWithSession { modelSwitchDelegate.setReasoningLevel(level) }
 
-    fun toggleFastMode() = modelSwitchDelegate.toggleFastMode()
+    fun toggleFastMode() = runWithSession { modelSwitchDelegate.toggleFastMode() }
 
     fun setDaybreak(on: Boolean) = modelSwitchDelegate.setDaybreak(on)
 
@@ -6766,6 +6883,9 @@ class ChatViewModel(
         catalogCwd = null
         pendingInitialPrompt = null
         pendingNewConversationSend = null
+        // Будь-яке скидання виходить із чернетки; createNewSession за потреби вмикає її знову.
+        draftSession = false
+        afterDraftMintActions.clear()
         ActiveSessionHolder.clear()
         cacheJob?.cancel()
         hydrationJob?.cancel()
@@ -6787,6 +6907,7 @@ class ChatViewModel(
             it.copy(
                 messages = emptyList(),
                 isSessionReady = false,
+                isDraftSession = false,
                 currentSessionId = sessionId,
                 composerScope = composerScope,
                 composerSessionId = sessionId,
@@ -6977,7 +7098,8 @@ class ChatViewModel(
         // createNewSession() clears messages immediately — queue the notice
         // until its result lands so the user actually sees it.
         pendingGoneSessionNotice = true
-        createNewSession(setLoading = false)
+        // Повідомлення про зниклу сесію показується з результату session.create — створюємо одразу.
+        createNewSession(setLoading = false, mintNow = true)
     }
 
     /**

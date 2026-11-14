@@ -712,17 +712,10 @@ class ChatViewModelTest {
             )
             advanceUntilIdle()
 
-            // The old chat is left behind and the share waits for the new session.
-            assertEquals(creates + 1, sentRequestMethods.count { it.first == WsMethods.SESSION_CREATE })
-            assertNull(viewModel.uiState.value.pendingSharedText)
-            assertTrue(
-                viewModel.uiState.value.pendingAttachments
-                    .isEmpty(),
-            )
-
-            val createId = sentRequestMethods.last { it.first == WsMethods.SESSION_CREATE }.second
-            mockEventsFlow.emit(WsEvent.RpcResult(createId, mapOf("session_id" to "session-456")))
-            advanceUntilIdle()
+            // Старий чат лишається позаду; новий відкривається чернеткою (без session.create),
+            // і поширений вміст застосовується до неї одразу.
+            assertEquals(creates, sentRequestMethods.count { it.first == WsMethods.SESSION_CREATE })
+            assertTrue(viewModel.uiState.value.isDraftSession)
 
             val state = viewModel.uiState.value
             assertEquals("note", state.pendingSharedText)
@@ -802,16 +795,18 @@ class ChatViewModelTest {
         mockEventsFlow.emit(WsEvent.GatewayReady(null))
         advanceUntilIdle()
 
-        // Emit SESSION_CREATE result (req-id-3 — after loadSessions and fetchCommandCatalog)
-        mockEventsFlow.emit(WsEvent.RpcResult("req-id-3", mapOf("session_id" to "session-123")))
+        // GatewayReady відкриває чернетку без session.create; імітуємо першу дію користувача.
+        viewModel.mintDraftSession()
+        advanceUntilIdle()
+        val createId = sentRequestMethods.last { it.first == WsMethods.SESSION_CREATE }.second
+        mockEventsFlow.emit(WsEvent.RpcResult(createId, mapOf("session_id" to "session-123")))
         advanceUntilIdle()
 
         // Sanity check: confirm the session was actually set
         val session = viewModel.uiState.value.currentSessionId
         checkNotNull(session) {
             "createViewModelWithSession: session was not set — " +
-                "req-id-3 did not match SESSION_CREATE. " +
-                "If the req sequence changed, update the RpcResult id here."
+                "the SESSION_CREATE result was not applied."
         }
 
         return Pair(viewModel, "session-123")
@@ -1272,10 +1267,11 @@ class ChatViewModelTest {
         }
 
     @Test
-    fun profileSwitch_endToEnd_recreatesFreshSessionInNewProfile() =
+    fun profileSwitch_endToEnd_opensFreshDraftInNewProfile() =
         runTest {
             val (viewModel, oldSessionId) = createViewModelWithSession()
             assertEquals(oldSessionId, viewModel.uiState.value.currentSessionId)
+            val createsBefore = sentRequestMethods.count { it.first == WsMethods.SESSION_CREATE }
 
             // 1. Switch fires → stale conversation wiped.
             mockSwitchFlow.emit("meow")
@@ -1283,30 +1279,32 @@ class ChatViewModelTest {
             assertNull(viewModel.uiState.value.currentSessionId)
 
             // 2. The coordinator re-dials the socket: disconnect first (status
-            //    transition), then gateway.ready → handleGatewayReady:
-            //    loadSessions (req-id-4), fetchCommandCatalog (req-id-5),
-            //    then createNewSession (req-id-6) — desktop requestFreshSession.
-            //    (The first ready cycle consumed req-ids 1-3.)
+            //    transition), then gateway.ready → handleGatewayReady.
             mockConnectionStatus.value = ConnectionStatus.DISCONNECTED
             advanceUntilIdle()
             mockConnectionStatus.value = ConnectionStatus.CONNECTED
             mockEventsFlow.emit(WsEvent.GatewayReady(null))
             advanceUntilIdle()
 
-            // 3. Fresh session created → a NEW session id, not the old one.
-            //    createNewSession is the LAST WS send of the ready cycle, so
-            //    its id is the current counter value (robust against extra
-            //    sends from the reconnect path).
+            // 3. Новий профіль відкриває чернетку: стара сесія не відновлюється, а нова
+            //    не створюється, доки немає першого повідомлення (без порожніх сесій в історії).
+            assertNull(viewModel.uiState.value.currentSessionId)
+            assertTrue(viewModel.uiState.value.isDraftSession)
+            assertEquals(createsBefore, sentRequestMethods.count { it.first == WsMethods.SESSION_CREATE })
+
+            // 4. Перша дія створює сесію вже в новому профілі.
+            viewModel.mintDraftSession()
+            advanceUntilIdle()
             mockEventsFlow.emit(
-                WsEvent.RpcResult("req-id-$reqCount", mapOf("session_id" to "session-meow")),
+                WsEvent.RpcResult(
+                    sentRequestMethods.last { it.first == WsMethods.SESSION_CREATE }.second,
+                    mapOf("session_id" to "session-meow"),
+                ),
             )
             advanceUntilIdle()
 
             assertEquals("session-meow", viewModel.uiState.value.currentSessionId)
             assertTrue(viewModel.uiState.value.currentSessionId != oldSessionId)
-            // The fresh session create goes through send() → WsProfileParams
-            // injects the active profile (the WS profile-scoping seam).
-            verify(atLeast = 1) { HermesWsClient.send(WsMethods.SESSION_CREATE, any(), any()) }
         }
 
     @Test
@@ -2610,19 +2608,21 @@ class ChatViewModelTest {
         }
 
     @Test
-    fun testAlreadyConnectedOnLaunch_createsSession() =
+    fun testAlreadyConnectedOnLaunch_opensDraft() =
         runTest {
             mockConnectionStatus.value = ConnectionStatus.CONNECTED
 
-            createViewModel()
+            val viewModel = createViewModel()
             advanceUntilIdle()
 
             verify { HermesWsClient.send(WsMethods.SESSION_LIST, any(), any()) }
-            verify { HermesWsClient.send(WsMethods.SESSION_CREATE, any(), any()) }
+            // Новий чат — чернетка: сесію створить перше повідомлення.
+            verify(inverse = true) { HermesWsClient.send(WsMethods.SESSION_CREATE, any(), any()) }
+            assertTrue(viewModel.uiState.value.isDraftSession)
         }
 
     @Test
-    fun testGatewayReady_createsSessionIfNoneExists() =
+    fun testGatewayReady_opensDraftIfNoneExists() =
         runTest {
             val viewModel = createViewModel()
             advanceUntilIdle()
@@ -2632,8 +2632,9 @@ class ChatViewModelTest {
             advanceUntilIdle()
 
             verify { HermesWsClient.send(WsMethods.SESSION_LIST, any(), any()) }
-            verify { HermesWsClient.send(WsMethods.SESSION_CREATE, any(), any()) }
+            verify(inverse = true) { HermesWsClient.send(WsMethods.SESSION_CREATE, any(), any()) }
             assertTrue(viewModel.uiState.value.isConnected)
+            assertTrue(viewModel.uiState.value.isDraftSession)
         }
 
     @Test
@@ -2694,9 +2695,11 @@ class ChatViewModelTest {
             mockEventsFlow.emit(WsEvent.GatewayReady(null))
             advanceUntilIdle()
 
-            // GatewayReady sends SESSION_LIST (req-id-1), COMMANDS_CATALOG (req-id-2),
-            // then SESSION_CREATE (req-id-3)
-            mockEventsFlow.emit(WsEvent.RpcResult("req-id-3", mapOf("session_id" to "session-123")))
+            // GatewayReady відкриває чернетку; сесію створює перша дія.
+            viewModel.mintDraftSession()
+            advanceUntilIdle()
+            val createId = sentRequestMethods.last { it.first == WsMethods.SESSION_CREATE }.second
+            mockEventsFlow.emit(WsEvent.RpcResult(createId, mapOf("session_id" to "session-123")))
             advanceUntilIdle()
 
             assertEquals("session-123", viewModel.uiState.value.currentSessionId)
@@ -7237,7 +7240,9 @@ class ChatViewModelTest {
             assertNull(state.resumeError)
             assertNull(state.pendingReasoningLevel)
             assertNull(state.reasoningWireLevel)
-            assertTrue(state.isLoading)
+            // Новий чат — чернетка: мережевого запиту немає, тож і завантаження немає.
+            assertFalse(state.isLoading)
+            assertTrue(state.isDraftSession)
         }
 
     @Test
@@ -7463,6 +7468,9 @@ class ChatViewModelTest {
             advanceUntilIdle()
             mockConnectionStatus.value = ConnectionStatus.CONNECTED
             mockEventsFlow.emit(WsEvent.GatewayReady(null))
+            advanceUntilIdle()
+            // session.create уже в дорозі (перша дія з чернетки), і тут сокет обривається.
+            viewModel.mintDraftSession()
             advanceUntilIdle()
             mockConnectionStatus.value = ConnectionStatus.RECONNECTING
             runCurrent()
@@ -8813,10 +8821,12 @@ class ChatViewModelTest {
             mockConnectionStatus.value = ConnectionStatus.CONNECTED
             mockEventsFlow.emit(WsEvent.GatewayReady(null))
             advanceUntilIdle()
+            viewModel.mintDraftSession()
+            advanceUntilIdle()
 
             mockEventsFlow.emit(
                 WsEvent.RpcResult(
-                    "req-id-3",
+                    sentRequestMethods.last { it.first == WsMethods.SESSION_CREATE }.second,
                     mapOf(
                         "session_id" to "runtime-sid-999",
                         "stored_session_id" to "storage-uuid-111",
@@ -11888,6 +11898,97 @@ class ChatViewModelTest {
             )
         }
 
+    // ── Чернетка нового чату: session.create лише з першою дією (як у десктопі) ──
+
+    @Test
+    fun `gateway ready opens a draft without creating a session`() =
+        runTest {
+            val vm = createViewModel()
+            advanceUntilIdle()
+            mockConnectionStatus.value = ConnectionStatus.CONNECTED
+            mockEventsFlow.emit(WsEvent.GatewayReady(null))
+            advanceUntilIdle()
+
+            assertTrue(sentRequestMethods.none { it.first == WsMethods.SESSION_CREATE })
+            assertTrue(vm.uiState.value.isDraftSession)
+            assertNull(vm.uiState.value.currentSessionId)
+
+            // Перепідключення (згортання застосунку / перемикання профілю) теж нічого не створює.
+            mockEventsFlow.emit(WsEvent.GatewayReady(null))
+            advanceUntilIdle()
+            assertTrue(sentRequestMethods.none { it.first == WsMethods.SESSION_CREATE })
+            assertTrue(vm.uiState.value.isDraftSession)
+        }
+
+    @Test
+    fun `new chat button in a draft sends nothing`() =
+        runTest {
+            val vm = createViewModel()
+            advanceUntilIdle()
+            mockConnectionStatus.value = ConnectionStatus.CONNECTED
+            mockEventsFlow.emit(WsEvent.GatewayReady(null))
+            advanceUntilIdle()
+
+            vm.createNewSession()
+            vm.createNewSession()
+            advanceUntilIdle()
+
+            assertTrue(sentRequestMethods.none { it.first == WsMethods.SESSION_CREATE })
+            assertTrue(vm.uiState.value.isDraftSession)
+        }
+
+    @Test
+    fun `first message from a draft creates the session and then dispatches the prompt`() =
+        runTest {
+            val vm = createViewModel()
+            advanceUntilIdle()
+            mockConnectionStatus.value = ConnectionStatus.CONNECTED
+            mockEventsFlow.emit(WsEvent.GatewayReady(null))
+            advanceUntilIdle()
+
+            val sentPrompts = mutableListOf<String>()
+            every { HermesWsClient.sendMessage(any(), capture(sentPrompts), any(), any()) } returns "req-send-d"
+
+            assertTrue(vm.sendMessage("hello from draft"))
+            advanceUntilIdle()
+
+            // Сесію створено саме зараз, промпт чекає на її відповідь.
+            assertEquals(1, sentRequestMethods.count { it.first == WsMethods.SESSION_CREATE })
+            assertFalse(vm.uiState.value.isDraftSession)
+            assertTrue(sentPrompts.isEmpty())
+
+            val createId = sentRequestMethods.last { it.first == WsMethods.SESSION_CREATE }.second
+            mockEventsFlow.emit(
+                WsEvent.RpcResult(createId, mapOf("session_id" to "rt-d", "stored_session_id" to "stored-d")),
+            )
+            advanceUntilIdle()
+
+            assertEquals(listOf("hello from draft"), sentPrompts)
+            assertEquals("stored-d", vm.uiState.value.currentSessionId)
+        }
+
+    @Test
+    fun `slash command from a draft runs after the session is created`() =
+        runTest {
+            val vm = createViewModel()
+            advanceUntilIdle()
+            mockConnectionStatus.value = ConnectionStatus.CONNECTED
+            mockEventsFlow.emit(WsEvent.GatewayReady(null))
+            advanceUntilIdle()
+
+            vm.sendMessage("/help")
+            advanceUntilIdle()
+            assertEquals(1, sentRequestMethods.count { it.first == WsMethods.SESSION_CREATE })
+            assertTrue(vm.uiState.value.messages.none { it.content == "/help" })
+
+            val createId = sentRequestMethods.last { it.first == WsMethods.SESSION_CREATE }.second
+            mockEventsFlow.emit(WsEvent.RpcResult(createId, mapOf("session_id" to "rt-h")))
+            advanceUntilIdle()
+
+            // Команду виконано вже в новій сесії (її рядок з'явився після створення).
+            assertTrue(vm.uiState.value.messages.any { it.content == "/help" })
+        }
+
     /**
      * Регресія: канонічний session.create (session-authority, є `authority_epoch`) одразу
      * записує сесію в БД. Повернення застосунку з фону (новий сокет → gateway.ready) має
@@ -11900,6 +12001,8 @@ class ChatViewModelTest {
             advanceUntilIdle()
             mockConnectionStatus.value = ConnectionStatus.CONNECTED
             mockEventsFlow.emit(WsEvent.GatewayReady(null))
+            advanceUntilIdle()
+            vm.mintDraftSession()
             advanceUntilIdle()
 
             val createId = sentRequestMethods.last { it.first == WsMethods.SESSION_CREATE }.second
@@ -11922,13 +12025,16 @@ class ChatViewModelTest {
         }
 
     @Test
-    fun `reconnect still re-creates a legacy unpersisted session`() =
+    fun `reconnect turns a legacy unpersisted session back into a draft`() =
         runTest {
-            // Legacy-шлюз (без `authority_epoch`) пише рядок лише на першому промпті: поведінка #969 без змін.
+            // Legacy-шлюз (без `authority_epoch`) пише рядок лише на першому промпті й губить
+            // непромптовану сесію разом із сокетом (#969): після перепідключення — нова чернетка.
             val vm = createViewModel()
             advanceUntilIdle()
             mockConnectionStatus.value = ConnectionStatus.CONNECTED
             mockEventsFlow.emit(WsEvent.GatewayReady(null))
+            advanceUntilIdle()
+            vm.mintDraftSession()
             advanceUntilIdle()
 
             val createId = sentRequestMethods.last { it.first == WsMethods.SESSION_CREATE }.second
@@ -11942,8 +12048,10 @@ class ChatViewModelTest {
             mockEventsFlow.emit(WsEvent.GatewayReady(null))
             advanceUntilIdle()
 
-            assertEquals(createsBefore + 1, sentRequestMethods.count { it.first == WsMethods.SESSION_CREATE })
+            // Сесію не відновлюємо й одразу не створюємо: відкривається чернетка.
+            assertEquals(createsBefore, sentRequestMethods.count { it.first == WsMethods.SESSION_CREATE })
             assertTrue(sentRequestMethods.none { it.first == WsMethods.SESSION_RESUME })
+            assertTrue(vm.uiState.value.isDraftSession)
         }
 
     @Test
@@ -11957,15 +12065,17 @@ class ChatViewModelTest {
             mockEventsFlow.emit(WsEvent.GatewayReady(null))
             advanceUntilIdle()
 
-            // On reconnect, an unpersisted session triggers createNewSession to mint a valid session on the new socket
-            verify(atLeast = 2) { HermesWsClient.send(WsMethods.SESSION_CREATE, any(), any()) }
+            // На перепідключенні непромптована сесія (legacy) стає чернеткою; нову сесію на
+            // новому сокеті створює саме повідомлення.
+            assertTrue(vm.uiState.value.isDraftSession)
 
             val sentPrompts = mutableListOf<String>()
             every { HermesWsClient.sendMessage(any(), capture(sentPrompts), any(), any()) } returns "req-send-2"
 
-            val createReqId = "req-id-$reqCount"
             vm.sendMessage("Prompt typed during reconnect")
             advanceUntilIdle()
+            verify(atLeast = 2) { HermesWsClient.send(WsMethods.SESSION_CREATE, any(), any()) }
+            val createReqId = sentRequestMethods.last { it.first == WsMethods.SESSION_CREATE }.second
 
             // Optimistic message in UI
             assertTrue(
@@ -12430,7 +12540,7 @@ class ChatViewModelTest {
         }
 
     @Test
-    fun testHandleGatewayReady_withRestoreLastSessionDisabled_createsNewSession() =
+    fun testHandleGatewayReady_withRestoreLastSessionDisabled_opensNewDraft() =
         runTest {
             every { AuthManager.isRestoreLastSession() } returns false
             every { AuthManager.getLastOpenedSessionId() } returns "session-stored-999"
@@ -12442,7 +12552,9 @@ class ChatViewModelTest {
             mockEventsFlow.emit(WsEvent.GatewayReady(null))
             advanceUntilIdle()
 
-            io.mockk.verify {
+            // Новий чат — чернетка без session.create.
+            assertTrue(viewModel.uiState.value.isDraftSession)
+            io.mockk.verify(exactly = 0) {
                 HermesWsClient.send(
                     WsMethods.SESSION_CREATE,
                     any(),

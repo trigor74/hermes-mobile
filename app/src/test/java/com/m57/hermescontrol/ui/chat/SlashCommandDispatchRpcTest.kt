@@ -201,6 +201,9 @@ class SlashCommandDispatchRpcTest {
         mockConnectionStatus.value = ConnectionStatus.CONNECTED
         mockEventsFlow.emit(WsEvent.GatewayReady(null))
         advanceUntilIdle()
+        // GatewayReady відкриває чернетку; імітуємо першу дію, що створює сесію.
+        vm.mintDraftSession()
+        advanceUntilIdle()
         val createRequestId = requireNotNull(sessionCreateRequestId) { "session.create was not sent" }
         mockEventsFlow.emit(WsEvent.RpcResult(createRequestId, mapOf("session_id" to "session-xyz")))
         advanceUntilIdle()

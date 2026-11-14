@@ -2,7 +2,8 @@ package com.m57.hermescontrol.ui.chat
 
 /** Captured before asynchronous clipboard access; never retarget a late image to a new chat. */
 internal data class ChatAttachmentTarget(
-    val sessionId: String,
+    // null — чернетка нового чату (сесію ще не створено).
+    val sessionId: String?,
     val generation: Long,
     val baseUrl: String,
     val connectionProfileId: String?,
