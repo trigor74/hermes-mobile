@@ -113,6 +113,39 @@ class AuthorityModelMutationTest {
         }
 
     @Test
+    fun `draft reasoning and fast ride session create under each route's names`() =
+        runTest {
+            val params =
+                com.m57.hermescontrol.data.ws.contract.SessionCreateParams(
+                    source = "desktop",
+                    reasoningEffort = "high",
+                    fast = true,
+                )
+            // session-authority: канонічні `reasoning` і `service_tier` (закритий набір ключів).
+            val (authority, _) = authorityChannel(mutableListOf())
+            val canonical =
+                authority.createRequest(
+                    WsMethods.SESSION_CREATE,
+                    authority.encodeParams(RpcMethods.SESSION_CREATE, params),
+                )
+            assertEquals("high", canonical.params.getValue("reasoning").jsonPrimitive.content)
+            assertEquals("fast", canonical.params.getValue("service_tier").jsonPrimitive.content)
+            assertNull(canonical.params["reasoning_effort"])
+            assertNull(canonical.params["fast"])
+
+            // Legacy-маршрут: власні імена без змін.
+            val legacy = RpcChannel(this, Json, { _, _, _ -> "" }, { true }, {}, {})
+            val legacyRequest =
+                legacy.createRequest(
+                    WsMethods.SESSION_CREATE,
+                    legacy.encodeParams(RpcMethods.SESSION_CREATE, params),
+                )
+            assertEquals("high", legacyRequest.params.getValue("reasoning_effort").jsonPrimitive.content)
+            assertEquals("true", legacyRequest.params.getValue("fast").jsonPrimitive.content)
+            assertNull(legacyRequest.params["service_tier"])
+        }
+
+    @Test
     fun `prepare without a known revision falls back to config set`() {
         val mutations = SessionMutations()
         val params =

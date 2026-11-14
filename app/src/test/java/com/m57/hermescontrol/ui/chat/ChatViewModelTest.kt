@@ -12026,6 +12026,39 @@ class ChatViewModelTest {
         }
 
     @Test
+    fun `reasoning pick in a draft is staged and sent with session create`() =
+        runTest {
+            val vm = createViewModel()
+            advanceUntilIdle()
+            mockConnectionStatus.value = ConnectionStatus.CONNECTED
+            mockEventsFlow.emit(WsEvent.GatewayReady(null))
+            advanceUntilIdle()
+
+            val createParams = mutableListOf<Map<String, Any>>()
+            every { HermesWsClient.send(WsMethods.SESSION_CREATE, any(), any()) } answers {
+                reqCount++
+                val id = "req-id-$reqCount"
+                sentRequestMethods += WsMethods.SESSION_CREATE to id
+                createParams += arg<Map<String, Any>>(1)
+                arg<((String) -> Unit)?>(2)?.invoke(id)
+                id
+            }
+
+            // Reasoning у чернетці: сесію не створюємо й config.set не шлемо, лише показуємо вибір.
+            vm.setReasoningLevel("high")
+            advanceUntilIdle()
+            assertTrue(createParams.isEmpty())
+            assertTrue(sentRequestMethods.none { it.first == WsMethods.CONFIG_SET })
+            assertTrue(vm.uiState.value.isDraftSession)
+            assertEquals("high", vm.uiState.value.reasoningLevel)
+
+            // Перше повідомлення створює сесію вже з обраним рівнем.
+            vm.sendMessage("hi")
+            advanceUntilIdle()
+            assertEquals(JsonPrimitive("high"), createParams.single()["reasoning_effort"])
+        }
+
+    @Test
     fun `slash command from a draft runs after the session is created`() =
         runTest {
             val vm = createViewModel()

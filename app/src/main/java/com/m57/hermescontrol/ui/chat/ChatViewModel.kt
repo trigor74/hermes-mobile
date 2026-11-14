@@ -733,6 +733,10 @@ class ChatViewModel(
 
     private var draftModelPick: DraftModelPick? = null
 
+    /** Reasoning і fast mode, обрані в чернетці: теж ідуть у `session.create`. */
+    private var draftReasoning: String? = null
+    private var draftFast: Boolean? = null
+
     /** Shared content waiting for the new session it was routed to (#1601); survives session resets. */
     private var stagedShare: IncomingShare? = null
 
@@ -5883,13 +5887,20 @@ class ChatViewModel(
         if (!draftSession) return
         draftSession = false
         val modelPick = draftModelPick
+        val reasoning = draftReasoning
+        val fast = draftFast
         draftModelPick = null
+        draftReasoning = null
+        draftFast = null
         _uiState.update { it.copy(isDraftSession = false) }
         sendSessionCreate(
             sessionGeneration,
             _uiState.value.stagedProject?.launchCwd,
             setLoading = false,
             modelPick = modelPick,
+            reasoning = reasoning,
+            // Лише ввімкнений fast: «normal» — це просто відсутність поля.
+            fast = fast?.takeIf { it },
         )
     }
 
@@ -5928,6 +5939,8 @@ class ChatViewModel(
         cwd: String?,
         setLoading: Boolean,
         modelPick: DraftModelPick? = null,
+        reasoning: String? = null,
+        fast: Boolean? = null,
     ) {
         viewModelScope.launch(ioDispatcher) {
             wsClient.send(
@@ -5938,6 +5951,8 @@ class ChatViewModel(
                     cwdExplicit = if (cwd != null) true else null,
                     model = modelPick?.model,
                     provider = modelPick?.provider,
+                    reasoningEffort = reasoning,
+                    fast = fast,
                 ),
                 onSent = { id -> trackSessionRequest(id, WsMethods.SESSION_CREATE, generation) },
             )
@@ -6109,10 +6124,34 @@ class ChatViewModel(
 
     fun confirmModelSwitchExpensive() = modelSwitchDelegate.confirmModelSwitchExpensive()
 
-    // Обидва налаштування діють на сесію: з чернетки застосовуються після її створення.
-    fun setReasoningLevel(level: String?) = runWithSession { modelSwitchDelegate.setReasoningLevel(level) }
+    // У чернетці обидва налаштування лише запам'ятовуються й ідуть у session.create
+    // (як модель): сам вибір не створює порожньої сесії.
+    fun setReasoningLevel(level: String?) {
+        if (!draftSession) {
+            modelSwitchDelegate.setReasoningLevel(level)
+            return
+        }
+        if (level == null) return
+        val caps = _uiState.value.currentModelCapabilities
+        // Ті самі перевірки можливостей моделі, що й для наявної сесії.
+        if (caps?.reasoningSupport == false) return
+        if (level == "none" && caps?.can_disable_reasoning == false) return
+        draftReasoning = level
+        _uiState.update { it.copy(reasoningLevel = level, reasoningWireLevel = null) }
+    }
 
-    fun toggleFastMode() = runWithSession { modelSwitchDelegate.toggleFastMode() }
+    fun toggleFastMode() {
+        if (!draftSession) {
+            modelSwitchDelegate.toggleFastMode()
+            return
+        }
+        val state = _uiState.value
+        // Як і для наявної сесії: лише для моделей, що підтримують fast.
+        if (state.currentModelCapabilities?.fast != true) return
+        val target = !state.fastMode
+        draftFast = target
+        _uiState.update { it.copy(fastMode = target) }
+    }
 
     fun setDaybreak(on: Boolean) = modelSwitchDelegate.setDaybreak(on)
 
@@ -6927,6 +6966,8 @@ class ChatViewModel(
         draftSession = false
         afterDraftMintActions.clear()
         draftModelPick = null
+        draftReasoning = null
+        draftFast = null
         ActiveSessionHolder.clear()
         cacheJob?.cancel()
         hydrationJob?.cancel()

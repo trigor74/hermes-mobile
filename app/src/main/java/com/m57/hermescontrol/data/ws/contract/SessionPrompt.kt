@@ -15,6 +15,10 @@ data class SessionCreateParams(
     // Модель, обрана в чернетці нового чату, задається при створенні сесії (як у десктопі).
     @SerialName("model") val model: String? = null,
     @SerialName("provider") val provider: String? = null,
+    // Reasoning і fast mode, обрані в чернетці. Legacy-імена; для session-authority
+    // RpcChannel перекладає їх у `reasoning` / `service_tier`.
+    @SerialName("reasoning_effort") val reasoningEffort: String? = null,
+    @SerialName("fast") val fast: Boolean? = null,
 )
 
 /**
